@@ -109,6 +109,11 @@ class LocalizationManager: ObservableObject {
             "legalButton": "תנאי שימוש ומדיניות פרטיות",
             "language": "שפה",
             "selectLanguage": "בחר שפה",
+            "waitingForResponse": "ממתין לתגובה",
+            "connectedToCar": "מחובר לרכב",
+            "childrenInCarMonitoring": "ילדים ברכב - ניטור פעיל",
+            "reminderActive": "תזכורת פעילה",
+            "confirmChildrenOut": "אנא אשר/י שהילדים יצאו מהרכב",
 
             // Settings
             "muteNotifications": "השתק התראות",
@@ -188,6 +193,11 @@ class LocalizationManager: ObservableObject {
             "legalButton": "Terms of Use & Privacy Policy",
             "language": "Language",
             "selectLanguage": "Select Language",
+            "waitingForResponse": "Waiting for Response",
+            "connectedToCar": "Connected to Car",
+            "childrenInCarMonitoring": "Children in car - active monitoring",
+            "reminderActive": "Reminder Active",
+            "confirmChildrenOut": "Please confirm children have left the vehicle",
 
             // Settings
             "muteNotifications": "Mute Notifications",
@@ -267,6 +277,11 @@ class LocalizationManager: ObservableObject {
             "legalButton": "شروط الاستخدام وسياسة الخصوصية",
             "language": "اللغة",
             "selectLanguage": "اختر اللغة",
+            "waitingForResponse": "في انتظار الرد",
+            "connectedToCar": "متصل بالسيارة",
+            "childrenInCarMonitoring": "أطفال في السيارة - مراقبة نشطة",
+            "reminderActive": "تذكير نشط",
+            "confirmChildrenOut": "يرجى التأكيد أن الأطفال غادروا السيارة",
 
             // Settings
             "muteNotifications": "كتم الإشعارات",
@@ -346,6 +361,11 @@ class LocalizationManager: ObservableObject {
             "legalButton": "Условия использования и политика конфиденциальности",
             "language": "Язык",
             "selectLanguage": "Выберите язык",
+            "waitingForResponse": "Ожидание ответа",
+            "connectedToCar": "Подключён к автомобилю",
+            "childrenInCarMonitoring": "Дети в машине - активный мониторинг",
+            "reminderActive": "Напоминание активно",
+            "confirmChildrenOut": "Пожалуйста, подтвердите, что дети вышли из машины",
 
             // Settings
             "muteNotifications": "Отключить звук уведомлений",
@@ -425,6 +445,11 @@ class LocalizationManager: ObservableObject {
             "legalButton": "Términos de uso y política de privacidad",
             "language": "Idioma",
             "selectLanguage": "Seleccionar idioma",
+            "waitingForResponse": "Esperando respuesta",
+            "connectedToCar": "Conectado al vehículo",
+            "childrenInCarMonitoring": "Niños en el vehículo - monitoreo activo",
+            "reminderActive": "Recordatorio activo",
+            "confirmChildrenOut": "Por favor confirma que los niños salieron del vehículo",
 
             // Settings
             "muteNotifications": "Silenciar notificaciones",
