@@ -2,7 +2,11 @@ import SwiftUI
 import SwiftData
 import UserNotifications
 
+// MARK: - Notification Delegate
+
 class AppNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
+
+    // Called when user taps on a notification action
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse,
@@ -13,21 +17,18 @@ class AppNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
 
         if category == "CHILDREN_IN_CAR" {
             if action == "YES_CHILDREN" {
-                UserDefaults.standard.set(true, forKey: "manualResponseOverride")
+                // User confirmed children are in the car -> enter drive mode
+                AppState.shared.driveStatus = .driveMode
             } else if action == "NO_CHILDREN" {
-                UserDefaults.standard.set(false, forKey: "manualResponseOverride")
+                // User said no children -> go back to idle
+                AppState.shared.driveStatus = .idle
             }
+
         } else if category == "REMINDER" {
-            if action == "YES_CHILDREN" {
-                center.removeAllPendingNotificationRequests()
-                UserDefaults.standard.set(false, forKey: "manualResponseOverride")
-            } else if action == UNNotificationDefaultActionIdentifier {
-                if let repeats = response.notification.request.content.userInfo["repeats"] as? Int {
-                    let newRepeats = repeats + 1
-                    if newRepeats < 10 {
-                        NotificationManager.scheduleReminderNotification(repeats: newRepeats)
-                    }
-                }
+            if action == "CONFIRM_CHILDREN_OUT" {
+                // User confirmed children are out -> cancel all reminders, back to idle
+                NotificationManager.cancelAllReminders()
+                AppState.shared.driveStatus = .idle
             }
         }
 
@@ -43,6 +44,8 @@ class AppNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
         completionHandler([.banner, .sound])
     }
 }
+
+// MARK: - App Entry Point
 
 @main
 struct baby_reminderApp: App {
@@ -73,7 +76,6 @@ struct baby_reminderApp: App {
             }
             .onAppear {
                 UNUserNotificationCenter.current().delegate = notificationDelegate
-                // Dismiss launch screen after 2.5 seconds
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
                     withAnimation(.easeOut(duration: 0.5)) {
                         showLaunchScreen = false
@@ -82,13 +84,11 @@ struct baby_reminderApp: App {
             }
         }
         .modelContainer(sharedModelContainer)
-        .onChange(of: scenePhase) { newPhase in
+        .onChange(of: scenePhase) { oldPhase, newPhase in
             switch newPhase {
             case .background:
-                // Schedule force-quit warning when app goes to background
                 NotificationManager.scheduleForceQuitWarning()
             case .active:
-                // Cancel force-quit warning when app returns to foreground
                 NotificationManager.cancelForceQuitWarning()
             default:
                 break

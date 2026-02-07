@@ -3,18 +3,30 @@ import UserNotifications
 import Combine
 import AVFoundation
 
-// MARK: - Global Helpers
+// MARK: - Drive Status
 
-private var manualResponseOverride: Bool {
-    get { UserDefaults.standard.bool(forKey: "manualResponseOverride") }
-    set { UserDefaults.standard.set(newValue, forKey: "manualResponseOverride") }
+enum DriveStatus: String {
+    case idle               // No car connected
+    case waitingForResponse // Car connected, waiting for user to confirm children
+    case driveMode          // Children confirmed in car, monitoring
+    case reminding          // Car disconnected, reminding user to check children
+}
+
+// MARK: - App State (shared between notification delegate and views)
+
+class AppState: ObservableObject {
+    static let shared = AppState()
+
+    @Published var driveStatus: DriveStatus = .idle
+
+    private init() {}
 }
 
 // MARK: - Models
 
 struct AutoResponseTimeWindow: Identifiable, Codable, Equatable {
     let id: UUID
-    var weekday: Int // 1-7
+    var weekday: Int // 1=Sunday ... 7=Saturday
     var startHour: Int
     var startMinute: Int
     var endHour: Int
@@ -42,6 +54,11 @@ class AudioRouteMonitor: ObservableObject {
         ) { [weak self] _ in
             self?.updateCurrentRoute()
         }
+    }
+
+    func updateDeviceNames(_ names: [String]) {
+        self.userDeviceNames = names
+        updateCurrentRoute()
     }
 
     deinit {
@@ -77,17 +94,17 @@ struct NotificationManager {
     private static let loc = LocalizationManager.shared
 
     static func requestAuthorization() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
         registerCategories()
     }
 
-    static func scheduleChildrenInCarNotification(repeats: Int = 0) {
+    // MARK: First notification - "Are children in the car?"
+    static func scheduleChildrenInCarNotification() {
         let content = UNMutableNotificationContent()
         content.title = loc.s("childrenInCarTitle")
         content.subtitle = loc.s("notificationSubtitle")
         content.body = loc.s("childrenInCarBody")
         content.categoryIdentifier = "CHILDREN_IN_CAR"
-        content.userInfo = ["repeats": repeats]
         content.sound = isMuted ? nil : UNNotificationSound.default
 
         let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
@@ -95,44 +112,37 @@ struct NotificationManager {
         UNUserNotificationCenter.current().add(request)
     }
 
-    static func scheduleReminderNotification(repeats: Int) {
-        if repeats == 0 {
-            for i in 0..<10 {
-                let content = UNMutableNotificationContent()
-                content.title = loc.s("reminderTitle")
-                content.subtitle = loc.s("notificationSubtitle")
-                content.body = loc.s("reminderBody")
-                content.categoryIdentifier = "REMINDER"
-                content.userInfo = ["repeats": i]
-                content.sound = isMuted ? nil : UNNotificationSound.default
+    static func cancelChildrenInCarNotification() {
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ["children_in_car"])
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["children_in_car"])
+    }
 
-                let timeInterval = (i == 0) ? 1.0 : TimeInterval(i * 60)
-                let trigger = UNTimeIntervalNotificationTrigger(timeInterval: timeInterval, repeats: false)
-                let request = UNNotificationRequest(identifier: "reminder_\(i)", content: content, trigger: trigger)
-                UNUserNotificationCenter.current().add(request)
-            }
-        } else {
-            guard repeats < 10 else { return }
-
+    // MARK: Reminder notifications - "Did you take the children out?"
+    static func scheduleAllReminders() {
+        for i in 0..<10 {
             let content = UNMutableNotificationContent()
             content.title = loc.s("reminderTitle")
             content.subtitle = loc.s("notificationSubtitle")
             content.body = loc.s("reminderBody")
             content.categoryIdentifier = "REMINDER"
-            content.userInfo = ["repeats": repeats]
+            content.userInfo = ["reminderIndex": i]
             content.sound = isMuted ? nil : UNNotificationSound.default
 
-            let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
-            let request = UNNotificationRequest(identifier: "reminder_\(repeats)", content: content, trigger: trigger)
+            // First one after 1 second, then every 60 seconds
+            let timeInterval = (i == 0) ? 1.0 : TimeInterval(i * 60)
+            let trigger = UNTimeIntervalNotificationTrigger(timeInterval: timeInterval, repeats: false)
+            let request = UNNotificationRequest(identifier: "reminder_\(i)", content: content, trigger: trigger)
             UNUserNotificationCenter.current().add(request)
         }
     }
 
-    static func cancelAllReminderNotifications() {
+    static func cancelAllReminders() {
         let identifiers = (0..<10).map { "reminder_\($0)" }
         UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: identifiers)
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: identifiers)
     }
 
+    // MARK: Force-quit warning
     static func scheduleForceQuitWarning() {
         let content = UNMutableNotificationContent()
         content.title = loc.s("forceQuitTitle")
@@ -149,20 +159,35 @@ struct NotificationManager {
         UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ["force_quit_warning"])
     }
 
+    // MARK: Register notification categories with action buttons
     static func registerCategories() {
-        let yes = UNNotificationAction(identifier: "YES_CHILDREN", title: loc.s("yesChildrenAction"), options: [])
-        let no = UNNotificationAction(identifier: "NO_CHILDREN", title: loc.s("noChildrenAction"), options: [])
+        // Category: "Are children in the car?" -> Yes / No
+        let yesAction = UNNotificationAction(
+            identifier: "YES_CHILDREN",
+            title: loc.s("yesChildrenAction"),
+            options: []
+        )
+        let noAction = UNNotificationAction(
+            identifier: "NO_CHILDREN",
+            title: loc.s("noChildrenAction"),
+            options: []
+        )
         let childrenCategory = UNNotificationCategory(
             identifier: "CHILDREN_IN_CAR",
-            actions: [yes, no],
+            actions: [yesAction, noAction],
             intentIdentifiers: [],
             options: []
         )
 
-        let yesReminder = UNNotificationAction(identifier: "YES_CHILDREN", title: loc.s("yesAction"), options: [])
+        // Category: "Did you take children out?" -> Yes
+        let confirmAction = UNNotificationAction(
+            identifier: "CONFIRM_CHILDREN_OUT",
+            title: loc.s("yesAction"),
+            options: []
+        )
         let reminderCategory = UNNotificationCategory(
             identifier: "REMINDER",
-            actions: [yesReminder],
+            actions: [confirmAction],
             intentIdentifiers: [],
             options: []
         )
@@ -218,6 +243,30 @@ class SettingsStore: ObservableObject {
         NotificationManager.isMuted = isMuted
     }
 
+    /// Check if auto-response should be "yes" based on settings and current time
+    func shouldAutoRespondYes() -> Bool {
+        if autoResponse == "yes" { return true }
+
+        // Default is "no" - check time windows
+        let now = Date()
+        let calendar = Calendar.current
+        let weekday = calendar.component(.weekday, from: now)
+        let hour = calendar.component(.hour, from: now)
+        let minute = calendar.component(.minute, from: now)
+        let currentMinutes = hour * 60 + minute
+
+        for window in autoResponseTimeWindows {
+            if window.weekday == weekday {
+                let start = window.startHour * 60 + window.startMinute
+                let end = window.endHour * 60 + window.endMinute
+                if currentMinutes >= start && currentMinutes <= end {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
     private func saveDevices() {
         if let data = try? JSONEncoder().encode(devices) {
             UserDefaults.standard.set(data, forKey: "devices")
@@ -249,7 +298,7 @@ struct ContentView: View {
     @State private var showLegal = false
     @StateObject private var settingsStore = SettingsStore()
     @StateObject private var audioRouteMonitor: AudioRouteMonitor
-    @State private var inDriveMode: Bool = false
+    @ObservedObject private var appState = AppState.shared
     @ObservedObject private var loc = LocalizationManager.shared
 
     init() {
@@ -262,19 +311,10 @@ struct ContentView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 20) {
-                    // MARK: App Header
                     headerSection
-
-                    // MARK: Warning Banner
                     warningBanner
-
-                    // MARK: Status Card
                     statusCard
-
-                    // MARK: Language Selector
                     languageCard
-
-                    // MARK: Action Buttons
                     actionButtons
                 }
                 .padding(.horizontal, 20)
@@ -302,10 +342,12 @@ struct ContentView: View {
             }
             .onAppear {
                 NotificationManager.requestAuthorization()
-                UNUserNotificationCenter.current().delegate = NotificationCenterDelegate.shared
             }
-            .onChange(of: audioRouteMonitor.deviceConnected) { newValue in
-                handleDeviceConnectionChange(newValue)
+            .onChange(of: audioRouteMonitor.deviceConnected) { oldValue, newValue in
+                handleDeviceConnectionChange(from: oldValue, to: newValue)
+            }
+            .onChange(of: settingsStore.devices) { _, newDevices in
+                audioRouteMonitor.updateDeviceNames(newDevices.map(\.name))
             }
         }
         .environment(\.layoutDirection, loc.layoutDirection)
@@ -314,7 +356,6 @@ struct ContentView: View {
     // MARK: - Header Section
     private var headerSection: some View {
         VStack(spacing: 8) {
-            // App Icon
             ZStack {
                 Circle()
                     .fill(
@@ -375,56 +416,58 @@ struct ContentView: View {
         .shadow(color: .babyRed.opacity(0.3), radius: 8, y: 4)
     }
 
-    // MARK: - Status Card
+    // MARK: - Status Card (4 states)
     private var statusCard: some View {
         VStack(spacing: 16) {
-            // Protection status
             HStack(spacing: 12) {
+                // Status icon
                 ZStack {
                     Circle()
-                        .fill(inDriveMode ? Color.safeGreen.opacity(0.15) : Color.gray.opacity(0.10))
+                        .fill(statusIconBackgroundColor.opacity(0.15))
                         .frame(width: 50, height: 50)
 
-                    Image(systemName: inDriveMode ? "shield.checkmark.fill" : "shield.slash.fill")
+                    Image(systemName: statusIconName)
                         .font(.system(size: 24))
-                        .foregroundColor(inDriveMode ? .safeGreen : .gray)
+                        .foregroundColor(statusIconBackgroundColor)
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(inDriveMode ? loc.s("protectionActive") : loc.s("protectionInactive"))
+                    Text(statusTitle)
                         .font(.system(size: 17, weight: .semibold, design: .rounded))
-                        .foregroundColor(inDriveMode ? .safeGreen : .gray)
+                        .foregroundColor(statusIconBackgroundColor)
 
-                    Text(inDriveMode ? loc.s("driveMode") : loc.s("notInDriveMode"))
+                    Text(statusSubtitle)
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(.secondary)
                 }
 
                 Spacer()
 
-                // Animated indicator
-                Circle()
-                    .fill(inDriveMode ? Color.safeGreen : Color.gray.opacity(0.3))
-                    .frame(width: 12, height: 12)
-                    .overlay(
-                        Circle()
-                            .stroke(inDriveMode ? Color.safeGreen.opacity(0.4) : Color.clear, lineWidth: 4)
-                            .scaleEffect(inDriveMode ? 2.0 : 1.0)
-                            .opacity(inDriveMode ? 0 : 1)
-                            .animation(
-                                inDriveMode
-                                    ? .easeOut(duration: 1.5).repeatForever(autoreverses: false)
-                                    : .default,
-                                value: inDriveMode
-                            )
-                    )
+                // Animated pulse indicator
+                if appState.driveStatus == .driveMode || appState.driveStatus == .reminding {
+                    Circle()
+                        .fill(statusIconBackgroundColor)
+                        .frame(width: 12, height: 12)
+                        .overlay(
+                            Circle()
+                                .stroke(statusIconBackgroundColor.opacity(0.4), lineWidth: 4)
+                                .scaleEffect(2.0)
+                                .opacity(0)
+                                .animation(
+                                    .easeOut(duration: 1.5).repeatForever(autoreverses: false),
+                                    value: appState.driveStatus
+                                )
+                        )
+                }
             }
 
             Divider()
 
-            // Connected device
+            // Connected device row
             HStack(spacing: 10) {
-                Image(systemName: audioRouteMonitor.deviceConnected != nil ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
+                Image(systemName: audioRouteMonitor.deviceConnected != nil
+                    ? "antenna.radiowaves.left.and.right"
+                    : "antenna.radiowaves.left.and.right.slash")
                     .font(.system(size: 16))
                     .foregroundColor(audioRouteMonitor.deviceConnected != nil ? .babyOrange : .gray)
 
@@ -445,6 +488,43 @@ struct ContentView: View {
         .shadow(color: Color.black.opacity(0.05), radius: 8, y: 2)
     }
 
+    // MARK: Status card helpers
+    private var statusIconName: String {
+        switch appState.driveStatus {
+        case .idle: return "shield.slash.fill"
+        case .waitingForResponse: return "questionmark.circle.fill"
+        case .driveMode: return "shield.checkmark.fill"
+        case .reminding: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private var statusIconBackgroundColor: Color {
+        switch appState.driveStatus {
+        case .idle: return .gray
+        case .waitingForResponse: return .babyOrange
+        case .driveMode: return .safeGreen
+        case .reminding: return .babyRed
+        }
+    }
+
+    private var statusTitle: String {
+        switch appState.driveStatus {
+        case .idle: return loc.s("protectionInactive")
+        case .waitingForResponse: return loc.s("waitingForResponse")
+        case .driveMode: return loc.s("protectionActive")
+        case .reminding: return loc.s("reminderActive")
+        }
+    }
+
+    private var statusSubtitle: String {
+        switch appState.driveStatus {
+        case .idle: return loc.s("notInDriveMode")
+        case .waitingForResponse: return loc.s("connectedToCar")
+        case .driveMode: return loc.s("childrenInCarMonitoring")
+        case .reminding: return loc.s("confirmChildrenOut")
+        }
+    }
+
     // MARK: - Language Card
     private var languageCard: some View {
         HStack(spacing: 12) {
@@ -462,7 +542,6 @@ struct ContentView: View {
                     Button {
                         withAnimation(.easeInOut(duration: 0.3)) {
                             loc.currentLanguage = lang
-                            // Re-register notification categories with new language
                             NotificationManager.registerCategories()
                         }
                     } label: {
@@ -497,7 +576,6 @@ struct ContentView: View {
     // MARK: - Action Buttons
     private var actionButtons: some View {
         VStack(spacing: 12) {
-            // Settings Button
             Button {
                 showSettings = true
             } label: {
@@ -529,7 +607,6 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
 
-            // Legal Button
             Button {
                 showLegal = true
             } label: {
@@ -564,76 +641,51 @@ struct ContentView: View {
     }
 
     // MARK: - Device Connection Handler
-    private func handleDeviceConnectionChange(_ newValue: String?) {
-        if newValue == nil {
-            if inDriveMode {
-                let now = Date()
-                let calendar = Calendar.current
-                let currentWeekday = calendar.component(.weekday, from: now)
-                let currentHour = calendar.component(.hour, from: now)
-                let currentMinute = calendar.component(.minute, from: now)
 
-                var isInTimeWindow = false
-                for window in settingsStore.autoResponseTimeWindows {
-                    if window.weekday == currentWeekday {
-                        let startTotal = window.startHour * 60 + window.startMinute
-                        let endTotal = window.endHour * 60 + window.endMinute
-                        let currentTotal = currentHour * 60 + currentMinute
-                        if currentTotal >= startTotal && currentTotal <= endTotal {
-                            isInTimeWindow = true
-                            break
-                        }
-                    }
+    private func handleDeviceConnectionChange(from oldValue: String?, to newValue: String?) {
+        if oldValue == nil && newValue != nil {
+            // --- DEVICE CONNECTED ---
+            appState.driveStatus = .waitingForResponse
+            NotificationManager.scheduleChildrenInCarNotification()
+
+        } else if oldValue != nil && newValue == nil {
+            // --- DEVICE DISCONNECTED ---
+            NotificationManager.cancelChildrenInCarNotification()
+
+            switch appState.driveStatus {
+            case .driveMode:
+                // User confirmed children in car -> now disconnected -> send reminders
+                appState.driveStatus = .reminding
+                NotificationManager.scheduleAllReminders()
+
+            case .waitingForResponse:
+                // User didn't respond -> use auto-response
+                if settingsStore.shouldAutoRespondYes() {
+                    appState.driveStatus = .reminding
+                    NotificationManager.scheduleAllReminders()
+                } else {
+                    appState.driveStatus = .idle
                 }
 
-                if manualResponseOverride || settingsStore.autoResponse == "yes" || isInTimeWindow {
-                    NotificationManager.scheduleReminderNotification(repeats: 0)
-                }
-                inDriveMode = false
-            }
-        } else {
-            manualResponseOverride = false
-            if !inDriveMode {
-                NotificationManager.scheduleChildrenInCarNotification()
-                inDriveMode = true
+            default:
+                // idle or already reminding -> just go idle
+                appState.driveStatus = .idle
             }
         }
-    }
-}
-
-// MARK: - Notification Center Delegate
-
-class NotificationCenterDelegate: NSObject, UNUserNotificationCenterDelegate {
-    static let shared = NotificationCenterDelegate()
-
-    private override init() { super.init() }
-
-    func userNotificationCenter(
-        _ center: UNUserNotificationCenter,
-        didReceive response: UNNotificationResponse,
-        withCompletionHandler completionHandler: @escaping () -> Void
-    ) {
-        let category = response.notification.request.content.categoryIdentifier
-
-        if category == "REMINDER" {
-            NotificationManager.cancelAllReminderNotifications()
-        }
-
-        completionHandler()
     }
 }
 
 // MARK: - Settings View
 
 struct SettingsView: View {
-    @StateObject var settingsStore: SettingsStore
+    @ObservedObject var settingsStore: SettingsStore
     @EnvironmentObject var loc: LocalizationManager
     @State private var newDeviceName: String = ""
     @State private var newTimeWindow: AutoResponseTimeWindow? = nil
 
     var body: some View {
         Form {
-            // MARK: Mute Section
+            // Mute
             Section {
                 Toggle(isOn: $settingsStore.isMuted) {
                     HStack(spacing: 10) {
@@ -650,7 +702,7 @@ struct SettingsView: View {
                     .foregroundColor(.gray)
             }
 
-            // MARK: Devices Section
+            // Devices
             Section {
                 ForEach(settingsStore.devices) { device in
                     HStack {
@@ -661,9 +713,7 @@ struct SettingsView: View {
                         Spacer()
                         Button(role: .destructive) {
                             if let index = settingsStore.devices.firstIndex(of: device) {
-                                withAnimation {
-                                    settingsStore.devices.remove(at: index)
-                                }
+                                withAnimation { settingsStore.devices.remove(at: index) }
                             }
                         } label: {
                             Image(systemName: "trash.fill")
@@ -706,7 +756,7 @@ struct SettingsView: View {
                 }
             }
 
-            // MARK: Auto Response Section
+            // Auto Response
             Section {
                 VStack(alignment: loc.alignment, spacing: 12) {
                     Picker(loc.s("autoResponseDefault"), selection: $settingsStore.autoResponse) {
@@ -758,9 +808,7 @@ struct SettingsView: View {
                     Spacer()
                     Button(role: .destructive) {
                         if let index = settingsStore.autoResponseTimeWindows.firstIndex(of: window) {
-                            withAnimation {
-                                settingsStore.autoResponseTimeWindows.remove(at: index)
-                            }
+                            withAnimation { settingsStore.autoResponseTimeWindows.remove(at: index) }
                         }
                     } label: {
                         Image(systemName: "trash.fill")
@@ -774,8 +822,8 @@ struct SettingsView: View {
                 .cornerRadius(10)
             }
 
-            if let newWindow = newTimeWindow {
-                newTimeWindowEditor(newWindow)
+            if let tw = newTimeWindow {
+                newTimeWindowEditor(tw)
             } else {
                 Button {
                     newTimeWindow = AutoResponseTimeWindow(
@@ -824,29 +872,27 @@ struct SettingsView: View {
 
             DatePicker(loc.s("startTime"), selection: Binding(
                 get: { dateFrom(hour: window.startHour, minute: window.startMinute) },
-                set: { newDate in
-                    let comps = Calendar.current.dateComponents([.hour, .minute], from: newDate)
-                    newTimeWindow?.startHour = comps.hour ?? 0
-                    newTimeWindow?.startMinute = comps.minute ?? 0
+                set: { date in
+                    let c = Calendar.current.dateComponents([.hour, .minute], from: date)
+                    newTimeWindow?.startHour = c.hour ?? 0
+                    newTimeWindow?.startMinute = c.minute ?? 0
                 }
             ), displayedComponents: [.hourAndMinute])
             .datePickerStyle(.compact)
 
             DatePicker(loc.s("endTime"), selection: Binding(
                 get: { dateFrom(hour: window.endHour, minute: window.endMinute) },
-                set: { newDate in
-                    let comps = Calendar.current.dateComponents([.hour, .minute], from: newDate)
-                    newTimeWindow?.endHour = comps.hour ?? 0
-                    newTimeWindow?.endMinute = comps.minute ?? 0
+                set: { date in
+                    let c = Calendar.current.dateComponents([.hour, .minute], from: date)
+                    newTimeWindow?.endHour = c.hour ?? 0
+                    newTimeWindow?.endMinute = c.minute ?? 0
                 }
             ), displayedComponents: [.hourAndMinute])
             .datePickerStyle(.compact)
 
             Button(loc.s("saveTimeWindow")) {
                 if let w = newTimeWindow {
-                    withAnimation {
-                        settingsStore.autoResponseTimeWindows.append(w)
-                    }
+                    withAnimation { settingsStore.autoResponseTimeWindows.append(w) }
                     newTimeWindow = nil
                 }
             }
@@ -861,80 +907,10 @@ struct SettingsView: View {
     }
 
     private func dateFrom(hour: Int, minute: Int) -> Date {
-        var comps = DateComponents()
-        comps.hour = hour
-        comps.minute = minute
-        return Calendar.current.date(from: comps) ?? Date()
-    }
-}
-
-// MARK: - Edit Time Window View
-
-struct EditTimeWindowView: View {
-    @Binding var window: AutoResponseTimeWindow
-    let weekdays: [(Int, String)]
-    var onDismiss: () -> Void
-    @EnvironmentObject var loc: LocalizationManager
-    @Environment(\.dismiss) var dismiss
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section(header: Text(loc.s("day"))) {
-                    Picker(loc.s("day"), selection: $window.weekday) {
-                        ForEach(weekdays, id: \.0) { day in
-                            Text(day.1).tag(day.0)
-                        }
-                    }
-                    .pickerStyle(.wheel)
-                }
-                Section(header: Text(loc.s("startTime"))) {
-                    DatePicker(loc.s("startTime"), selection: Binding(
-                        get: { dateFrom(hour: window.startHour, minute: window.startMinute) },
-                        set: { newDate in
-                            let comps = Calendar.current.dateComponents([.hour, .minute], from: newDate)
-                            window.startHour = comps.hour ?? 0
-                            window.startMinute = comps.minute ?? 0
-                        }
-                    ), displayedComponents: [.hourAndMinute])
-                    .datePickerStyle(.wheel)
-                }
-                Section(header: Text(loc.s("endTime"))) {
-                    DatePicker(loc.s("endTime"), selection: Binding(
-                        get: { dateFrom(hour: window.endHour, minute: window.endMinute) },
-                        set: { newDate in
-                            let comps = Calendar.current.dateComponents([.hour, .minute], from: newDate)
-                            window.endHour = comps.hour ?? 0
-                            window.endMinute = comps.minute ?? 0
-                        }
-                    ), displayedComponents: [.hourAndMinute])
-                    .datePickerStyle(.wheel)
-                }
-            }
-            .navigationTitle(loc.s("editTimeWindow"))
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button(loc.s("cancel")) { dismiss() }
-                }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(loc.s("done")) {
-                        dismiss()
-                        onDismiss()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.babyOrange)
-                }
-            }
-        }
-        .environment(\.layoutDirection, loc.layoutDirection)
-    }
-
-    private func dateFrom(hour: Int, minute: Int) -> Date {
-        var comps = DateComponents()
-        comps.hour = hour
-        comps.minute = minute
-        return Calendar.current.date(from: comps) ?? Date()
+        var c = DateComponents()
+        c.hour = hour
+        c.minute = minute
+        return Calendar.current.date(from: c) ?? Date()
     }
 }
 
