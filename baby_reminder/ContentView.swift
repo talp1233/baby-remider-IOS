@@ -143,14 +143,17 @@ struct NotificationManager {
     }
 
     // MARK: Force-quit warning
-    static func scheduleForceQuitWarning() {
+    static func scheduleForceQuitWarning(delay: TimeInterval = 20) {
+        // Cancel previous one before rescheduling
+        cancelForceQuitWarning()
+
         let content = UNMutableNotificationContent()
         content.title = loc.s("forceQuitTitle")
         content.subtitle = loc.s("notificationSubtitle")
         content.body = loc.s("forceQuitBody")
         content.sound = UNNotificationSound.default
 
-        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 10, repeats: false)
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: delay, repeats: false)
         let request = UNNotificationRequest(identifier: "force_quit_warning", content: content, trigger: trigger)
         UNUserNotificationCenter.current().add(request)
     }
