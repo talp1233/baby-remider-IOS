@@ -71,9 +71,11 @@ class AudioRouteMonitor: ObservableObject {
         let session = AVAudioSession.sharedInstance()
         let outputs = session.currentRoute.outputs
 
+        // First, check if any output matches user's listed device names
         if let match = outputs.first(where: { userDeviceNames.contains($0.portName) }) {
             deviceConnected = match.portName
-        } else if let specialOutput = outputs.first(where: {
+        } else if userDeviceNames.isEmpty, let specialOutput = outputs.first(where: {
+            // Only detect any BT/car audio when user hasn't listed specific devices
             $0.portType == .carAudio ||
             $0.portType == .usbAudio ||
             $0.portType == .bluetoothA2DP ||
@@ -648,6 +650,10 @@ struct ContentView: View {
     private func handleDeviceConnectionChange(from oldValue: String?, to newValue: String?) {
         if oldValue == nil && newValue != nil {
             // --- DEVICE CONNECTED ---
+            // Cancel any active reminders from a previous trip
+            if appState.driveStatus == .reminding {
+                NotificationManager.cancelAllReminders()
+            }
             appState.driveStatus = .waitingForResponse
             NotificationManager.scheduleChildrenInCarNotification()
 
