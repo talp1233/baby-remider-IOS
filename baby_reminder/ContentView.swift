@@ -2,6 +2,7 @@ import SwiftUI
 import UserNotifications
 import Combine
 import AVFoundation
+import ExternalAccessory
 
 // MARK: - Drive Status
 
@@ -42,18 +43,58 @@ struct BluetoothDevice: Identifiable, Equatable, Codable {
 
 class AudioRouteMonitor: ObservableObject {
     @Published var deviceConnected: String? = nil
+    @Published var isCarPlayConnected: Bool = false
     private var userDeviceNames: [String]
-    private var observer: NSObjectProtocol?
+    private var routeObserver: NSObjectProtocol?
+    private var carPlayConnectObserver: NSObjectProtocol?
+    private var carPlayDisconnectObserver: NSObjectProtocol?
+    private var accessoryObserver: NSObjectProtocol?
 
     init(deviceNames: [String]) {
         self.userDeviceNames = deviceNames
         updateCurrentRoute()
-        observer = NotificationCenter.default.addObserver(
+
+        // Monitor audio route changes (BT connect/disconnect)
+        routeObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.routeChangeNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
             self?.updateCurrentRoute()
         }
+
+        // Monitor CarPlay scene connections
+        carPlayConnectObserver = NotificationCenter.default.addObserver(
+            forName: UIScene.willConnectNotification,
+            object: nil, queue: .main
+        ) { [weak self] notification in
+            if let scene = notification.object as? UIScene,
+               scene.session.role == .carTemplateApplication {
+                self?.isCarPlayConnected = true
+                self?.handleCarPlayConnection()
+            }
+        }
+
+        carPlayDisconnectObserver = NotificationCenter.default.addObserver(
+            forName: UIScene.didDisconnectNotification,
+            object: nil, queue: .main
+        ) { [weak self] notification in
+            if let scene = notification.object as? UIScene,
+               scene.session.role == .carTemplateApplication {
+                self?.isCarPlayConnected = false
+                self?.handleCarPlayDisconnection()
+            }
+        }
+
+        // Monitor external accessories (some car systems appear as accessories)
+        accessoryObserver = NotificationCenter.default.addObserver(
+            forName: .EAAccessoryDidConnect,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.updateCurrentRoute()
+        }
+
+        // Check if CarPlay is already connected at launch
+        checkExistingCarPlaySessions()
     }
 
     func updateDeviceNames(_ names: [String]) {
@@ -62,8 +103,33 @@ class AudioRouteMonitor: ObservableObject {
     }
 
     deinit {
-        if let observer = observer {
-            NotificationCenter.default.removeObserver(observer)
+        if let o = routeObserver { NotificationCenter.default.removeObserver(o) }
+        if let o = carPlayConnectObserver { NotificationCenter.default.removeObserver(o) }
+        if let o = carPlayDisconnectObserver { NotificationCenter.default.removeObserver(o) }
+        if let o = accessoryObserver { NotificationCenter.default.removeObserver(o) }
+    }
+
+    private func checkExistingCarPlaySessions() {
+        for session in UIApplication.shared.openSessions {
+            if session.role == .carTemplateApplication {
+                isCarPlayConnected = true
+                break
+            }
+        }
+    }
+
+    private func handleCarPlayConnection() {
+        if deviceConnected == nil {
+            deviceConnected = "CarPlay"
+        }
+    }
+
+    private func handleCarPlayDisconnection() {
+        if deviceConnected == "CarPlay" {
+            updateCurrentRoute()
+            if deviceConnected == "CarPlay" {
+                deviceConnected = nil
+            }
         }
     }
 
@@ -74,9 +140,14 @@ class AudioRouteMonitor: ObservableObject {
         // First, check if any output matches user's listed device names
         if let match = outputs.first(where: { userDeviceNames.contains($0.portName) }) {
             deviceConnected = match.portName
+        } else if let carPlayOutput = outputs.first(where: { $0.portType == .carAudio }) {
+            // Always detect CarPlay / car audio connections
+            deviceConnected = carPlayOutput.portName
+        } else if isCarPlayConnected {
+            // CarPlay scene is connected even if no audio route yet
+            deviceConnected = "CarPlay"
         } else if userDeviceNames.isEmpty, let specialOutput = outputs.first(where: {
-            // Only detect any BT/car audio when user hasn't listed specific devices
-            $0.portType == .carAudio ||
+            // Only detect any BT audio when user hasn't listed specific devices
             $0.portType == .usbAudio ||
             $0.portType == .bluetoothA2DP ||
             $0.portType == .bluetoothHFP ||
