@@ -49,9 +49,17 @@ class AudioRouteMonitor: ObservableObject {
     private var carPlayConnectObserver: NSObjectProtocol?
     private var carPlayDisconnectObserver: NSObjectProtocol?
     private var accessoryObserver: NSObjectProtocol?
+    private weak var appState: AppState?
+    private weak var settingsStore: SettingsStore?
 
-    init(deviceNames: [String]) {
+    init(deviceNames: [String], appState: AppState, settingsStore: SettingsStore) {
         self.userDeviceNames = deviceNames
+        self.appState = appState
+        self.settingsStore = settingsStore
+
+        // Configure and activate audio session so we receive route change notifications
+        configureAudioSession()
+
         updateCurrentRoute()
 
         // Monitor audio route changes (BT connect/disconnect)
@@ -93,6 +101,14 @@ class AudioRouteMonitor: ObservableObject {
             self?.updateCurrentRoute()
         }
 
+        // Also re-activate audio session when app becomes active (in case it was deactivated)
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.configureAudioSession()
+        }
+
         // Check if CarPlay is already connected at launch
         checkExistingCarPlaySessions()
     }
@@ -109,6 +125,26 @@ class AudioRouteMonitor: ObservableObject {
         if let o = accessoryObserver { NotificationCenter.default.removeObserver(o) }
     }
 
+    // MARK: - Audio Session Configuration
+
+    private func configureAudioSession() {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            // Use .playback category with BT options to receive route change notifications
+            // .mixWithOthers prevents interrupting other audio apps
+            try session.setCategory(
+                .playback,
+                mode: .default,
+                options: [.allowBluetooth, .allowBluetoothA2DP, .mixWithOthers]
+            )
+            try session.setActive(true, options: [.notifyOthersOnDeactivation])
+        } catch {
+            // Silently fail - route monitoring may still work via notifications
+        }
+    }
+
+    // MARK: - CarPlay Helpers
+
     private func checkExistingCarPlaySessions() {
         for session in UIApplication.shared.openSessions {
             if session.role == .carTemplateApplication {
@@ -120,22 +156,30 @@ class AudioRouteMonitor: ObservableObject {
 
     private func handleCarPlayConnection() {
         if deviceConnected == nil {
+            let oldValue = deviceConnected
             deviceConnected = "CarPlay"
+            handleDeviceConnectionChange(from: oldValue, to: "CarPlay")
         }
     }
 
     private func handleCarPlayDisconnection() {
         if deviceConnected == "CarPlay" {
+            let oldValue = deviceConnected
+            deviceConnected = nil
+            // Check if there's still a BT audio device connected
             updateCurrentRoute()
-            if deviceConnected == "CarPlay" {
-                deviceConnected = nil
+            if deviceConnected == nil {
+                handleDeviceConnectionChange(from: oldValue, to: nil)
             }
         }
     }
 
+    // MARK: - Route Detection
+
     private func updateCurrentRoute() {
         let session = AVAudioSession.sharedInstance()
         let outputs = session.currentRoute.outputs
+        let oldValue = deviceConnected
 
         // First, check if any output matches user's listed device names
         if let match = outputs.first(where: { userDeviceNames.contains($0.portName) }) {
@@ -156,6 +200,61 @@ class AudioRouteMonitor: ObservableObject {
             deviceConnected = specialOutput.portName
         } else {
             deviceConnected = nil
+        }
+
+        // Trigger connection change logic if device status changed
+        if oldValue != deviceConnected {
+            handleDeviceConnectionChange(from: oldValue, to: deviceConnected)
+        }
+    }
+
+    // MARK: - Connection State Machine (runs in background too)
+
+    private func handleDeviceConnectionChange(from oldValue: String?, to newValue: String?) {
+        guard let appState = appState else { return }
+
+        if oldValue == nil && newValue != nil {
+            // --- DEVICE CONNECTED ---
+            // Cancel any active reminders from a previous trip
+            if appState.driveStatus == .reminding {
+                NotificationManager.cancelAllReminders()
+            }
+            DispatchQueue.main.async {
+                appState.driveStatus = .waitingForResponse
+            }
+            NotificationManager.scheduleChildrenInCarNotification()
+
+        } else if oldValue != nil && newValue == nil {
+            // --- DEVICE DISCONNECTED ---
+            NotificationManager.cancelChildrenInCarNotification()
+
+            switch appState.driveStatus {
+            case .driveMode:
+                // User confirmed children in car -> now disconnected -> send reminders
+                DispatchQueue.main.async {
+                    appState.driveStatus = .reminding
+                }
+                NotificationManager.scheduleAllReminders()
+
+            case .waitingForResponse:
+                // User didn't respond -> use auto-response
+                if settingsStore?.shouldAutoRespondYes() == true {
+                    DispatchQueue.main.async {
+                        appState.driveStatus = .reminding
+                    }
+                    NotificationManager.scheduleAllReminders()
+                } else {
+                    DispatchQueue.main.async {
+                        appState.driveStatus = .idle
+                    }
+                }
+
+            default:
+                // idle or already reminding -> just go idle
+                DispatchQueue.main.async {
+                    appState.driveStatus = .idle
+                }
+            }
         }
     }
 }
@@ -380,7 +479,11 @@ struct ContentView: View {
     init() {
         let store = SettingsStore()
         _settingsStore = StateObject(wrappedValue: store)
-        _audioRouteMonitor = StateObject(wrappedValue: AudioRouteMonitor(deviceNames: store.devices.map(\.name)))
+        _audioRouteMonitor = StateObject(wrappedValue: AudioRouteMonitor(
+            deviceNames: store.devices.map(\.name),
+            appState: AppState.shared,
+            settingsStore: store
+        ))
     }
 
     var body: some View {
@@ -418,9 +521,6 @@ struct ContentView: View {
             }
             .onAppear {
                 NotificationManager.requestAuthorization()
-            }
-            .onChange(of: audioRouteMonitor.deviceConnected) { oldValue, newValue in
-                handleDeviceConnectionChange(from: oldValue, to: newValue)
             }
             .onChange(of: settingsStore.devices) { _, newDevices in
                 audioRouteMonitor.updateDeviceNames(newDevices.map(\.name))
@@ -716,43 +816,6 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Device Connection Handler
-
-    private func handleDeviceConnectionChange(from oldValue: String?, to newValue: String?) {
-        if oldValue == nil && newValue != nil {
-            // --- DEVICE CONNECTED ---
-            // Cancel any active reminders from a previous trip
-            if appState.driveStatus == .reminding {
-                NotificationManager.cancelAllReminders()
-            }
-            appState.driveStatus = .waitingForResponse
-            NotificationManager.scheduleChildrenInCarNotification()
-
-        } else if oldValue != nil && newValue == nil {
-            // --- DEVICE DISCONNECTED ---
-            NotificationManager.cancelChildrenInCarNotification()
-
-            switch appState.driveStatus {
-            case .driveMode:
-                // User confirmed children in car -> now disconnected -> send reminders
-                appState.driveStatus = .reminding
-                NotificationManager.scheduleAllReminders()
-
-            case .waitingForResponse:
-                // User didn't respond -> use auto-response
-                if settingsStore.shouldAutoRespondYes() {
-                    appState.driveStatus = .reminding
-                    NotificationManager.scheduleAllReminders()
-                } else {
-                    appState.driveStatus = .idle
-                }
-
-            default:
-                // idle or already reminding -> just go idle
-                appState.driveStatus = .idle
-            }
-        }
-    }
 }
 
 // MARK: - Settings View
