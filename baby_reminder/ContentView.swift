@@ -49,6 +49,7 @@ class AudioRouteMonitor: ObservableObject {
     private var carPlayConnectObserver: NSObjectProtocol?
     private var carPlayDisconnectObserver: NSObjectProtocol?
     private var accessoryObserver: NSObjectProtocol?
+    private var pollingTimer: Timer?
     private weak var appState: AppState?
     private weak var settingsStore: SettingsStore?
 
@@ -62,11 +63,18 @@ class AudioRouteMonitor: ObservableObject {
 
         updateCurrentRoute()
 
-        // Monitor audio route changes (BT connect/disconnect)
+        // Monitor audio route changes (BT connect/disconnect) - primary detection
         routeObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.routeChangeNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
+            self?.updateCurrentRoute()
+        }
+
+        // Polling timer - backup detection every 5 seconds
+        // routeChangeNotification doesn't fire reliably in background,
+        // but the timer runs because silent audio keeps the app alive
+        pollingTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             self?.updateCurrentRoute()
         }
 
@@ -101,7 +109,7 @@ class AudioRouteMonitor: ObservableObject {
             self?.updateCurrentRoute()
         }
 
-        // Also re-activate audio session when app becomes active (in case it was deactivated)
+        // Re-activate audio session when app becomes active
         NotificationCenter.default.addObserver(
             forName: UIApplication.didBecomeActiveNotification,
             object: nil, queue: .main
@@ -119,6 +127,7 @@ class AudioRouteMonitor: ObservableObject {
     }
 
     deinit {
+        pollingTimer?.invalidate()
         if let o = routeObserver { NotificationCenter.default.removeObserver(o) }
         if let o = carPlayConnectObserver { NotificationCenter.default.removeObserver(o) }
         if let o = carPlayDisconnectObserver { NotificationCenter.default.removeObserver(o) }
