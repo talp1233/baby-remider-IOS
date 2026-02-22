@@ -3,6 +3,7 @@ import UserNotifications
 import Combine
 import AVFoundation
 import ExternalAccessory
+import CarPlay
 
 // MARK: - Drive Status
 
@@ -135,7 +136,7 @@ class AudioRouteMonitor: ObservableObject {
             try session.setCategory(
                 .playback,
                 mode: .default,
-                options: [.allowBluetooth, .allowBluetoothA2DP, .mixWithOthers]
+                options: [.allowBluetoothHFP, .allowBluetoothA2DP, .mixWithOthers]
             )
             try session.setActive(true, options: [.notifyOthersOnDeactivation])
         } catch {
@@ -856,7 +857,7 @@ struct SettingsView: View {
                         Spacer()
                         Button(role: .destructive) {
                             if let index = settingsStore.devices.firstIndex(of: device) {
-                                withAnimation { settingsStore.devices.remove(at: index) }
+                                _ = withAnimation { settingsStore.devices.remove(at: index) }
                             }
                         } label: {
                             Image(systemName: "trash.fill")
@@ -951,7 +952,7 @@ struct SettingsView: View {
                     Spacer()
                     Button(role: .destructive) {
                         if let index = settingsStore.autoResponseTimeWindows.firstIndex(of: window) {
-                            withAnimation { settingsStore.autoResponseTimeWindows.remove(at: index) }
+                            _ = withAnimation { settingsStore.autoResponseTimeWindows.remove(at: index) }
                         }
                     } label: {
                         Image(systemName: "trash.fill")
