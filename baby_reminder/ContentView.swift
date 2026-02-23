@@ -50,8 +50,8 @@ class AudioRouteMonitor: ObservableObject {
     private var carPlayConnectObserver: NSObjectProtocol?
     private var carPlayDisconnectObserver: NSObjectProtocol?
     private var accessoryObserver: NSObjectProtocol?
-    private weak var appState: AppState?
-    private weak var settingsStore: SettingsStore?
+    private var appState: AppState
+    private var settingsStore: SettingsStore
 
     init(deviceNames: [String], appState: AppState, settingsStore: SettingsStore) {
         self.userDeviceNames = deviceNames
@@ -212,17 +212,13 @@ class AudioRouteMonitor: ObservableObject {
     // MARK: - Connection State Machine (runs in background too)
 
     private func handleDeviceConnectionChange(from oldValue: String?, to newValue: String?) {
-        guard let appState = appState else { return }
-
         if oldValue == nil && newValue != nil {
             // --- DEVICE CONNECTED ---
             // Cancel any active reminders from a previous trip
             if appState.driveStatus == .reminding {
                 NotificationManager.cancelAllReminders()
             }
-            DispatchQueue.main.async {
-                appState.driveStatus = .waitingForResponse
-            }
+            appState.driveStatus = .waitingForResponse
             NotificationManager.scheduleChildrenInCarNotification()
 
         } else if oldValue != nil && newValue == nil {
@@ -232,29 +228,21 @@ class AudioRouteMonitor: ObservableObject {
             switch appState.driveStatus {
             case .driveMode:
                 // User confirmed children in car -> now disconnected -> send reminders
-                DispatchQueue.main.async {
-                    appState.driveStatus = .reminding
-                }
+                appState.driveStatus = .reminding
                 NotificationManager.scheduleAllReminders()
 
             case .waitingForResponse:
                 // User didn't respond -> use auto-response
-                if settingsStore?.shouldAutoRespondYes() == true {
-                    DispatchQueue.main.async {
-                        appState.driveStatus = .reminding
-                    }
+                if settingsStore.shouldAutoRespondYes() {
+                    appState.driveStatus = .reminding
                     NotificationManager.scheduleAllReminders()
                 } else {
-                    DispatchQueue.main.async {
-                        appState.driveStatus = .idle
-                    }
+                    appState.driveStatus = .idle
                 }
 
             default:
                 // idle or already reminding -> just go idle
-                DispatchQueue.main.async {
-                    appState.driveStatus = .idle
-                }
+                appState.driveStatus = .idle
             }
         }
     }

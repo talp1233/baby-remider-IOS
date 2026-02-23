@@ -82,14 +82,16 @@ class ForceQuitDetector {
         // Start silent audio to keep the app alive in background
         BackgroundAudioManager.shared.startBackgroundAudio()
 
-        // Also start a background task as fallback
+        // Start rescheduling loop - the silent audio keeps the app alive
+        // so the timer continues to fire and prevents the force-quit notification
+        startReschedulingLoop()
+
+        // Also start a background task as extra buffer
         backgroundTask = UIApplication.shared.beginBackgroundTask { [weak self] in
-            NotificationManager.scheduleForceQuitWarning(delay: 30)
+            // Background task expired, but silent audio keeps the app alive.
+            // Just end the task - don't stop the rescheduling timer.
             self?.endBackgroundTask()
         }
-
-        // While alive in background, keep rescheduling the force-quit notification
-        startReschedulingLoop()
     }
 
     func appDidBecomeActive() {
@@ -101,14 +103,20 @@ class ForceQuitDetector {
     }
 
     private func startReschedulingLoop() {
+        // Stop any existing timer first
+        stopReschedulingLoop()
+
         // Schedule notification 20 seconds from now
         NotificationManager.scheduleForceQuitWarning(delay: 20)
 
         // Every 10 seconds, push the notification further into the future
         // As long as this timer runs, the notification never fires
-        timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { _ in
+        let newTimer = Timer(timeInterval: 10, repeats: true) { _ in
             NotificationManager.scheduleForceQuitWarning(delay: 20)
         }
+        // Add to common run loop mode so it fires in background too
+        RunLoop.main.add(newTimer, forMode: .common)
+        timer = newTimer
     }
 
     private func stopReschedulingLoop() {
@@ -117,7 +125,6 @@ class ForceQuitDetector {
     }
 
     private func endBackgroundTask() {
-        stopReschedulingLoop()
         if backgroundTask != .invalid {
             UIApplication.shared.endBackgroundTask(backgroundTask)
             backgroundTask = .invalid
